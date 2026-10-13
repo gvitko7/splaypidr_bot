@@ -6,55 +6,125 @@
   <title>Скрытый Стригун</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #17212b);
+      --text: var(--tg-theme-text-color, #ffffff);
+      --hint: var(--tg-theme-hint-color, #708499);
+      --btn: var(--tg-theme-button-color, #5288c1);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --secondary-bg: var(--tg-theme-secondary-bg-color, #232e3c);
+    }
     body {
-      background: var(--tg-theme-bg-color, #18222d);
-      color: var(--tg-theme-text-color, #ffffff);
+      background: var(--bg);
+      color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       margin: 0;
-      padding: 20px;
+      padding: 16px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
-      min-height: 85vh;
-      text-align: center;
       box-sizing: border-box;
+      min-height: 100vh;
     }
-    .status {
-      font-size: 18px;
+    .header {
+      font-size: 17px;
       font-weight: 600;
       margin-bottom: 12px;
+      text-align: center;
     }
-    .result-box {
+    .hint {
+      font-size: 13px;
+      color: var(--hint);
+      margin-bottom: 14px;
+      text-align: center;
+    }
+    textarea {
       width: 100%;
-      max-width: 400px;
-      background: rgba(255, 255, 255, 0.08);
+      max-width: 440px;
+      height: 90px;
+      background: var(--secondary-bg);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 12px;
-      padding: 16px;
-      margin-top: 15px;
-      text-align: left;
-      font-size: 15px;
-      line-height: 1.4;
-      word-break: break-word;
-      display: none;
+      padding: 12px;
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+    textarea:focus {
+      border-color: var(--btn);
+    }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      width: 100%;
+      max-width: 440px;
+      margin-top: 12px;
     }
     .btn {
-      background: var(--tg-theme-button-color, #2481cc);
-      color: var(--tg-theme-button-text-color, #ffffff);
+      flex: 1;
+      background: var(--btn);
+      color: var(--btn-text);
       border: none;
       border-radius: 10px;
-      padding: 12px 24px;
-      font-size: 16px;
+      padding: 12px;
+      font-size: 15px;
       font-weight: 600;
       cursor: pointer;
-      margin-top: 10px;
+      text-align: center;
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+    }
+    .result-card {
+      width: 100%;
+      max-width: 440px;
+      background: var(--secondary-bg);
+      border-radius: 12px;
+      padding: 14px;
+      margin-top: 16px;
+      box-sizing: border-box;
+      display: none;
+      border-left: 4px solid #4fa955;
+    }
+    .result-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #4fa955;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .result-content {
+      font-size: 15px;
+      line-height: 1.45;
+      word-break: break-word;
+      user-select: text;
+    }
+    .error-card {
+      border-left-color: #e53935;
+      color: #ff8a80;
     }
   </style>
 </head>
 <body>
-  <div class="status" id="status">Загрузка...</div>
-  <button class="btn" id="actionBtn" style="display: none;"></button>
-  <div class="result-box" id="resultBox"></div>
+  <div class="header" id="statusHeader">Загрузка...</div>
+  <div class="hint" id="statusHint"></div>
+
+  <textarea id="pasteBox" placeholder="Вставьте скопированный текст сюда (Ctrl+V)..." style="display: none;"></textarea>
+
+  <div class="btn-row" id="btnContainer" style="display: none;">
+    <button class="btn" id="pasteBtn">📋 Вставить из буфера</button>
+  </div>
+
+  <div class="result-card" id="resultCard">
+    <div class="result-title" id="resultLabel">Расшифровано</div>
+    <div class="result-content" id="resultText"></div>
+    <button class="btn btn-secondary" id="copyResultBtn" style="margin-top: 12px; width: 100%;">Скопировать секрет</button>
+  </div>
 
   <script>
     const tg = window.Telegram.WebApp;
@@ -76,7 +146,6 @@
       );
     }
 
-    // Криптографические функции (SHA-256 + XOR + DecompressStream)
     async function generateKeystream(keyStr, length) {
       const encoder = new TextEncoder();
       const keyBytes = encoder.encode(keyStr);
@@ -103,6 +172,18 @@
       return keystream;
     }
 
+    async function decompressZlib(compressed) {
+      try {
+        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate"));
+        return await new Response(stream).text();
+      } catch (e1) {
+        // Fallback: распаковка сырого deflate без 2 байт заголовка и 4 байт adler32
+        const raw = compressed.subarray(2, compressed.length - 4);
+        const streamRaw = new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        return await new Response(streamRaw).text();
+      }
+    }
+
     async function decryptPayload(payloadBytes, key) {
       if (payloadBytes.length < 5) throw new Error("Слишком короткий контейнер.");
       const salt = payloadBytes.subarray(0, 4);
@@ -116,19 +197,13 @@
         compressed[i] = encrypted[i] ^ stream[i];
       }
 
-      const ds = new DecompressionStream("deflate");
-      const writer = ds.writable.getWriter();
-      writer.write(compressed);
-      writer.close();
-      const response = new Response(ds.readable);
-      const arrayBuffer = await response.arrayBuffer();
-      return new TextDecoder().decode(arrayBuffer);
+      return await decompressZlib(compressed);
     }
 
     function zwToBytes(zwString) {
       const pattern = new RegExp(ZW_START + "([" + ZW_BIT_0 + ZW_BIT_1 + "]+)" + ZW_END);
       const match = zwString.match(pattern);
-      if (!match) throw new Error("В тексте нет скрытых маркеров контейнера.");
+      if (!match) throw new Error("В тексте не найден скрытый контейнер Стригунов.");
 
       const rawBits = match[1];
       const bytes = [];
@@ -142,26 +217,35 @@
       return new Uint8Array(bytes);
     }
 
-    // Главная логика
     const params = new URLSearchParams(window.location.search);
     const encData = params.get("d");
-    const mode = params.get("m");
 
-    async function run() {
-      // 1. РЕЖИМ КОПИРОВАНИЯ (Шифрование)
+    const statusHeader = document.getElementById("statusHeader");
+    const statusHint = document.getElementById("statusHint");
+    const pasteBox = document.getElementById("pasteBox");
+    const btnContainer = document.getElementById("btnContainer");
+    const pasteBtn = document.getElementById("pasteBtn");
+    const resultCard = document.getElementById("resultCard");
+    const resultText = document.getElementById("resultText");
+    const resultLabel = document.getElementById("resultLabel");
+    const copyResultBtn = document.getElementById("copyResultBtn");
+
+    async function init() {
+      // РЕЖИМ 1: КОПИРОВАНИЕ ЗАШИФРОВАННОГО СООБЩЕНИЯ
       if (encData) {
+        statusHeader.innerText = "Копирование в буфер...";
         try {
           const textToCopy = decodeB64(encData);
           await navigator.clipboard.writeText(textToCopy);
           if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
-          document.getElementById("status").innerText = "Скопировано жирным! Вставьте в чат.";
-          setTimeout(() => tg.close(), 400);
-        } catch (e) {
-          document.getElementById("status").innerText = "Нажмите для копирования жирным:";
-          const btn = document.getElementById("actionBtn");
-          btn.style.display = "block";
-          btn.innerText = "Скопировать";
-          btn.onclick = async () => {
+          statusHeader.innerText = "Скопировано жирным шрифтом!";
+          statusHint.innerText = "Вставьте в чат от своего имени";
+          setTimeout(() => tg.close(), 500);
+        } catch {
+          statusHeader.innerText = "Нажмите кнопку для копирования:";
+          btnContainer.style.display = "flex";
+          pasteBtn.innerText = "📋 Скопировать текст";
+          pasteBtn.onclick = async () => {
             await navigator.clipboard.writeText(decodeB64(encData));
             tg.close();
           };
@@ -169,52 +253,87 @@
         return;
       }
 
-      // 2. РЕЖИМ РАСШИФРОВКИ
-      document.getElementById("status").innerText = "Расшифровка сообщения";
-      const btn = document.getElementById("actionBtn");
-      btn.style.display = "block";
-      btn.innerText = "📋 Вставить из буфера и прочитать";
+      // РЕЖИМ 2: ДЕШИФРОВКА
+      statusHeader.innerText = "Расшифровка сообщения";
+      statusHint.innerText = "Вставьте скопированную фразу в поле ниже:";
+      pasteBox.style.display = "block";
+      btnContainer.style.display = "flex";
 
-      async function doDecrypt(text) {
+      setTimeout(() => pasteBox.focus(), 150);
+
+      async function processText(text) {
+        if (!text || !text.trim()) return;
         try {
           const bytes = zwToBytes(text);
           const decrypted = await decryptPayload(bytes, DEFAULT_KEY);
-          document.getElementById("status").innerText = "🔓 Успешно расшифровано:";
-          const res = document.getElementById("resultBox");
-          res.style.display = "block";
-          res.innerText = decrypted;
-          btn.innerText = "Закрыть";
-          btn.onclick = () => tg.close();
+
+          resultCard.style.display = "block";
+          resultCard.classList.remove("error-card");
+          resultLabel.innerText = "Секретное сообщение:";
+          resultText.innerText = decrypted;
+          copyResultBtn.style.display = "block";
+
+          copyResultBtn.onclick = async () => {
+            await navigator.clipboard.writeText(decrypted);
+            copyResultBtn.innerText = "Скопировано!";
+            setTimeout(() => { copyResultBtn.innerText = "Скопировать секрет"; }, 1500);
+          };
+
+          if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
         } catch (err) {
-          document.getElementById("status").innerText = "❌ Ошибка: " + err.message;
+          resultCard.style.display = "block";
+          resultCard.classList.add("error-card");
+          resultLabel.innerText = "Ошибка:";
+          resultText.innerText = err.message;
+          copyResultBtn.style.display = "none";
         }
       }
 
-      btn.onclick = async () => {
+      // Авто-дешифровка при вставке или вводе текста в поле
+      pasteBox.addEventListener("input", () => processText(pasteBox.value));
+      pasteBox.addEventListener("paste", (e) => {
+        const pasted = (e.clipboardData || window.clipboardData).getData('text');
+        if (pasted) setTimeout(() => processText(pasted), 50);
+      });
+
+      // Обработка клика по кнопке «Вставить из буфера»
+      pasteBtn.onclick = async () => {
+        let textFound = false;
+
+        // Попытка через Telegram WebApp API
         if (tg.readTextFromClipboard) {
           tg.readTextFromClipboard(clipText => {
-            if (clipText) doDecrypt(clipText);
+            if (clipText) {
+              pasteBox.value = clipText;
+              processText(clipText);
+              textFound = true;
+            }
           });
-        } else {
+        }
+
+        // Попытка через браузерный Clipboard API
+        if (!textFound && navigator.clipboard && navigator.clipboard.readText) {
           try {
             const clipText = await navigator.clipboard.readText();
-            doDecrypt(clipText);
-          } catch {
-            const pasted = prompt("Вставьте скопированное сообщение сюда:");
-            if (pasted) doDecrypt(pasted);
-          }
+            if (clipText) {
+              pasteBox.value = clipText;
+              processText(clipText);
+              textFound = true;
+            }
+          } catch {}
+        }
+
+        // Если Telegram заблокировал доступ к буферу
+        if (!textFound) {
+          pasteBox.focus();
+          statusHint.innerText = "Буфер заблокирован клиентом — нажмите Ctrl+V в поле!";
+          pasteBox.style.borderColor = "#e53935";
+          setTimeout(() => { pasteBox.style.borderColor = ""; }, 1500);
         }
       };
-
-      // Пробуем прочесть сразу при открытии
-      if (tg.readTextFromClipboard) {
-        tg.readTextFromClipboard(clipText => {
-          if (clipText && clipText.includes(ZW_START)) doDecrypt(clipText);
-        });
-      }
     }
 
-    run();
+    init();
   </script>
 </body>
 </html>
