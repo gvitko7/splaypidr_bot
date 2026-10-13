@@ -3,34 +3,69 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Копирование</title>
+  <title>Скрытый Стригун</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     body {
       background: var(--tg-theme-bg-color, #18222d);
       color: var(--tg-theme-text-color, #ffffff);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      height: 100vh;
-      margin: 0;
+      min-height: 85vh;
       text-align: center;
+      box-sizing: border-box;
     }
     .status {
-      font-size: 17px;
+      font-size: 18px;
       font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .result-box {
+      width: 100%;
+      max-width: 400px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 16px;
+      margin-top: 15px;
+      text-align: left;
+      font-size: 15px;
+      line-height: 1.4;
+      word-break: break-word;
+      display: none;
+    }
+    .btn {
+      background: var(--tg-theme-button-color, #2481cc);
+      color: var(--tg-theme-button-text-color, #ffffff);
+      border: none;
+      border-radius: 10px;
+      padding: 12px 24px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 10px;
     }
   </style>
 </head>
 <body>
-  <div class="status" id="status">Копирование в буфер...</div>
+  <div class="status" id="status">Загрузка...</div>
+  <button class="btn" id="actionBtn" style="display: none;"></button>
+  <div class="result-box" id="resultBox"></div>
 
   <script>
     const tg = window.Telegram.WebApp;
     tg.ready();
     tg.expand();
+
+    const DEFAULT_KEY = "striguny_secret_2026";
+    const ZW_START = "\u200D";
+    const ZW_END = "\u200E";
+    const ZW_BIT_0 = "\u200B";
+    const ZW_BIT_1 = "\u200C";
 
     function decodeB64(str) {
       return decodeURIComponent(
@@ -41,38 +76,145 @@
       );
     }
 
-    async function copyAndExit() {
-      try {
-        const params = new URLSearchParams(window.location.search);
-        const rawData = params.get("d");
+    // Криптографические функции (SHA-256 + XOR + DecompressStream)
+    async function generateKeystream(keyStr, length) {
+      const encoder = new TextEncoder();
+      const keyBytes = encoder.encode(keyStr);
+      let keystream = new Uint8Array(length);
+      let counter = 0;
+      let offset = 0;
 
-        if (!rawData) {
-          document.getElementById("status").innerText = "Ошибка: данные не переданы.";
-          return;
+      while (offset < length) {
+        const counterBytes = new Uint8Array(4);
+        new DataView(counterBytes.buffer).setUint32(0, counter, false);
+
+        const data = new Uint8Array(keyBytes.length + 4);
+        data.set(keyBytes);
+        data.set(counterBytes, keyBytes.length);
+
+        const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+        const hashBytes = new Uint8Array(hashBuffer);
+
+        const toCopy = Math.min(hashBytes.length, length - offset);
+        keystream.set(hashBytes.subarray(0, toCopy), offset);
+        offset += toCopy;
+        counter++;
+      }
+      return keystream;
+    }
+
+    async function decryptPayload(payloadBytes, key) {
+      if (payloadBytes.length < 5) throw new Error("Слишком короткий контейнер.");
+      const salt = payloadBytes.subarray(0, 4);
+      const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
+      const encrypted = payloadBytes.subarray(4);
+      const sessionKey = key + saltHex;
+
+      const stream = await generateKeystream(sessionKey, encrypted.length);
+      const compressed = new Uint8Array(encrypted.length);
+      for (let i = 0; i < encrypted.length; i++) {
+        compressed[i] = encrypted[i] ^ stream[i];
+      }
+
+      const ds = new DecompressionStream("deflate");
+      const writer = ds.writable.getWriter();
+      writer.write(compressed);
+      writer.close();
+      const response = new Response(ds.readable);
+      const arrayBuffer = await response.arrayBuffer();
+      return new TextDecoder().decode(arrayBuffer);
+    }
+
+    function zwToBytes(zwString) {
+      const pattern = new RegExp(ZW_START + "([" + ZW_BIT_0 + ZW_BIT_1 + "]+)" + ZW_END);
+      const match = zwString.match(pattern);
+      if (!match) throw new Error("В тексте нет скрытых маркеров контейнера.");
+
+      const rawBits = match[1];
+      const bytes = [];
+      for (let i = 0; i < rawBits.length; i += 8) {
+        let byteStr = "";
+        for (let j = 0; j < 8; j++) {
+          byteStr += (rawBits[i + j] === ZW_BIT_1 ? "1" : "0");
         }
+        bytes.push(parseInt(byteStr, 2));
+      }
+      return new Uint8Array(bytes);
+    }
 
-        const textToCopy = decodeB64(rawData);
-        await navigator.clipboard.writeText(textToCopy);
+    // Главная логика
+    const params = new URLSearchParams(window.location.search);
+    const encData = params.get("d");
+    const mode = params.get("m");
 
-        if (tg.HapticFeedback) {
-          tg.HapticFeedback.notificationOccurred("success");
+    async function run() {
+      // 1. РЕЖИМ КОПИРОВАНИЯ (Шифрование)
+      if (encData) {
+        try {
+          const textToCopy = decodeB64(encData);
+          await navigator.clipboard.writeText(textToCopy);
+          if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+          document.getElementById("status").innerText = "Скопировано жирным! Вставьте в чат.";
+          setTimeout(() => tg.close(), 400);
+        } catch (e) {
+          document.getElementById("status").innerText = "Нажмите для копирования жирным:";
+          const btn = document.getElementById("actionBtn");
+          btn.style.display = "block";
+          btn.innerText = "Скопировать";
+          btn.onclick = async () => {
+            await navigator.clipboard.writeText(decodeB64(encData));
+            tg.close();
+          };
         }
+        return;
+      }
 
-        document.getElementById("status").innerText = "Скопировано! Вставьте в чат.";
-        setTimeout(() => {
-          tg.close();
-        }, 400);
-      } catch (err) {
-        document.getElementById("status").innerText = "Нажмите на экран для копирования";
-        document.body.onclick = async () => {
-          const params = new URLSearchParams(window.location.search);
-          await navigator.clipboard.writeText(decodeB64(params.get("d")));
-          tg.close();
-        };
+      // 2. РЕЖИМ РАСШИФРОВКИ
+      document.getElementById("status").innerText = "Расшифровка сообщения";
+      const btn = document.getElementById("actionBtn");
+      btn.style.display = "block";
+      btn.innerText = "📋 Вставить из буфера и прочитать";
+
+      async function doDecrypt(text) {
+        try {
+          const bytes = zwToBytes(text);
+          const decrypted = await decryptPayload(bytes, DEFAULT_KEY);
+          document.getElementById("status").innerText = "🔓 Успешно расшифровано:";
+          const res = document.getElementById("resultBox");
+          res.style.display = "block";
+          res.innerText = decrypted;
+          btn.innerText = "Закрыть";
+          btn.onclick = () => tg.close();
+        } catch (err) {
+          document.getElementById("status").innerText = "❌ Ошибка: " + err.message;
+        }
+      }
+
+      btn.onclick = async () => {
+        if (tg.readTextFromClipboard) {
+          tg.readTextFromClipboard(clipText => {
+            if (clipText) doDecrypt(clipText);
+          });
+        } else {
+          try {
+            const clipText = await navigator.clipboard.readText();
+            doDecrypt(clipText);
+          } catch {
+            const pasted = prompt("Вставьте скопированное сообщение сюда:");
+            if (pasted) doDecrypt(pasted);
+          }
+        }
+      };
+
+      // Пробуем прочесть сразу при открытии
+      if (tg.readTextFromClipboard) {
+        tg.readTextFromClipboard(clipText => {
+          if (clipText && clipText.includes(ZW_START)) doDecrypt(clipText);
+        });
       }
     }
 
-    copyAndExit();
+    run();
   </script>
 </body>
 </html>
