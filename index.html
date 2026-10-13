@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Копирование</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      background: var(--tg-theme-bg-color, #18222d);
+      color: var(--tg-theme-text-color, #ffffff);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      text-align: center;
+    }
+    .status {
+      font-size: 17px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="status" id="status">Копирование в буфер...</div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    function decodeB64(str) {
+      return decodeURIComponent(
+        atob(str)
+          .split('')
+          .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+    }
+
+    async function copyAndExit() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const rawData = params.get("d");
+
+        if (!rawData) {
+          document.getElementById("status").innerText = "Ошибка: данные не переданы.";
+          return;
+        }
+
+        const textToCopy = decodeB64(rawData);
+        await navigator.clipboard.writeText(textToCopy);
+
+        if (tg.HapticFeedback) {
+          tg.HapticFeedback.notificationOccurred("success");
+        }
+
+        document.getElementById("status").innerText = "Скопировано! Вставьте в чат.";
+        setTimeout(() => {
+          tg.close();
+        }, 400);
+      } catch (err) {
+        document.getElementById("status").innerText = "Нажмите на экран для копирования";
+        document.body.onclick = async () => {
+          const params = new URLSearchParams(window.location.search);
+          await navigator.clipboard.writeText(decodeB64(params.get("d")));
+          tg.close();
+        };
+      }
+    }
+
+    copyAndExit();
+  </script>
+</body>
+</html>
